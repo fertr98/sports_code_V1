@@ -1,0 +1,8 @@
+PyMuPDF
+pandas
+pydantic
+google-genai
+python-dotenv
+PyYAML
+tqdm
+pytest

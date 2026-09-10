@@ -1,0 +1,6 @@
+sport:
+  id: rugby_xv
+  name: Rugby XV
+  governing_body: World Rugby
+  players_per_team: 15
+  source: world_rugby

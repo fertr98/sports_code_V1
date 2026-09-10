@@ -1,0 +1,17 @@
+name: sports_code_02
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  - pymupdf
+  - pandas
+  - pydantic
+  - pyyaml
+  - tqdm
+  - pytest
+  - pip:
+      - google-genai
+      - python-dotenv

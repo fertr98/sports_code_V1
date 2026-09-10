@@ -1,0 +1,9 @@
+pipeline:
+  sport: rugby_xv
+  source: world_rugby
+  year: 2026
+  output_format: jsonl
+
+paths:
+  data_root: data
+  config_root: config
