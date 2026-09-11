@@ -1,277 +1,283 @@
-"""Structure cleaned sports content into laws and regulatory sections."""
+"""Structure cleaned sports documents into sections."""
 
 import json
 import re
 from pathlib import Path
 
-INPUT_PATH = Path("data/sports/rugby_xv/world_rugby/2026/structured/cleaned_pages.json")
+INPUT_PATH = Path(
+    "data/sports/rugby_xv/world_rugby/2026/structured/cleaned_documents.json"
+)
 
 OUTPUT_PATH = Path(
-    "data/sports/rugby_xv/world_rugby/2026/structured/laws_structured.json"
+    "data/sports/rugby_xv/world_rugby/2026/structured/structured_documents.json"
 )
 
 
-LAW_PATTERN = re.compile(r"^Ley\s+(\d+)\s*$", re.IGNORECASE)
-
-SECTION_PATTERN = re.compile(r"^(?P<number>\d+(?:\.\d+)?)\.\s*(?P<title>.+)?$")
-
-
-def normalize_line(line: str) -> str:
-    """Normalize a single line."""
-
-    return re.sub(r"\s+", " ", line).strip()
-
-
-def is_law_heading(line: str) -> bool:
-    """Return True when a line represents a law heading."""
-
-    return LAW_PATTERN.match(line) is not None
-
-
-def parse_law_number(line: str) -> int:
-    """Extract the law number from a law heading."""
-
-    match = LAW_PATTERN.match(line)
-
-    if match is None:
-        raise ValueError(f"Invalid law heading: {line}")
-
-    return int(match.group(1))
+HEADER_PATTERNS = [
+    re.compile(r"^WORLDRUGBY$", re.IGNORECASE),
+    re.compile(r"^LEYES DEL JUEGO DE RUGBY 2026(?:\s+\d+)?$", re.IGNORECASE),
+]
 
 
 def is_section_start(line: str) -> bool:
-    """Return True when a line starts a numbered regulatory section."""
+    """Detect numbered law sections."""
 
-    return SECTION_PATTERN.match(line) is not None
-
-
-def parse_section_number(line: str) -> str | None:
-    """Extract the section number from a numbered line."""
-
-    match = SECTION_PATTERN.match(line)
-
-    if match is None:
-        return None
-
-    return match.group("number")
+    return bool(
+        re.match(
+            r"^\d+\.\s*",
+            line.strip(),
+        )
+    )
 
 
-def merge_wrapped_lines(lines: list[str]) -> str:
-    """Merge PDF line wrapping while preserving paragraph boundaries."""
+def is_all_caps_heading(line: str) -> bool:
+    """Detect standalone uppercase headings."""
+
+    line = line.strip()
+
+    if not line:
+        return False
+
+    if any(pattern.match(line) for pattern in HEADER_PATTERNS):
+        return False
+
+    if len(line.split()) > 15:
+        return False
+
+    letters = [char for char in line if char.isalpha()]
+
+    if not letters:
+        return False
+
+    return all(char.isupper() for char in letters)
+
+
+def is_title_heading(line: str) -> bool:
+    """Detect short title-style headings."""
+
+    line = line.strip()
+
+    if not line:
+        return False
+
+    if len(line.split()) > 6:
+        return False
+
+    if line[-1:] in ".,:;!?":
+        return False
+
+    if any(char.isdigit() for char in line):
+        return False
+
+    words = line.split()
+
+    if len(words) < 2:
+        return False
+
+    # Normal sentences are not headings.
+    forbidden_starts = {
+        "Antes",
+        "Después",
+        "Cuando",
+        "Si",
+        "Los",
+        "Las",
+        "El",
+        "La",
+        "Un",
+        "Una",
+        "Cada",
+        "Ningún",
+        "Ninguna",
+        "Cualquier",
+        "Todo",
+        "Toda",
+        "En",
+        "Para",
+        "Por",
+        "Durante",
+    }
+
+    if words[0] in forbidden_starts:
+        return False
+
+    return words[0][0].isupper()
+
+
+def is_heading(line: str) -> bool:
+    """Detect likely real headings."""
+
+    return is_all_caps_heading(line) or is_title_heading(line)
+
+
+def remove_artifacts(lines: list[str]) -> list[str]:
+    """Remove repeated PDF headers and footers."""
+
+    cleaned = []
+
+    for line in lines:
+        line = line.strip()
+
+        if any(pattern.match(line) for pattern in HEADER_PATTERNS):
+            continue
+
+        cleaned.append(line)
+
+    return cleaned
+
+
+def extract_sections(text: str) -> list[dict]:
+    """Extract every numbered section."""
+
+    lines = remove_artifacts(text.splitlines())
+
+    sections = []
+    current_section = None
+
+    for line in lines:
+        line = line.strip()
+
+        if is_section_start(line):
+            if current_section is not None:
+                sections.append(current_section)
+
+            match = re.match(
+                r"^(\d+)\.\s*(.*)$",
+                line,
+            )
+
+            number = int(match.group(1))
+            remainder = match.group(2).strip()
+
+            current_section = {
+                "number": number,
+                "heading": "",
+                "text_lines": [],
+            }
+
+            # Important:
+            # the text after "10." is NOT automatically a heading.
+            if remainder:
+                current_section["text_lines"].append(remainder)
+
+            continue
+
+        if current_section is None:
+            continue
+
+        current_section["text_lines"].append(line)
+
+    if current_section is not None:
+        sections.append(current_section)
+
+    return sections
+
+
+def move_headings_to_next_section(
+    sections: list[dict],
+) -> list[dict]:
+    """
+    Detect headings that appear immediately before the next
+    numbered section because of PDF extraction order.
+    """
+
+    for index in range(len(sections) - 1):
+        current = sections[index]
+        next_section = sections[index + 1]
+
+        lines = current["text_lines"]
+
+        while lines and not lines[-1]:
+            lines.pop()
+
+        if not lines:
+            continue
+
+        candidate = lines[-1]
+
+        if is_heading(candidate):
+            next_section["heading"] = candidate
+            lines.pop()
+
+    return sections
+
+
+def clean_section_text(sections: list[dict]) -> list[dict]:
+    """Clean section text and preserve all regulatory content."""
 
     result = []
 
-    for line in lines:
-        line = normalize_line(line)
+    for section in sections:
+        lines = section["text_lines"]
 
-        if not line:
-            if result and result[-1] != "":
-                result.append("")
-            continue
+        while lines and not lines[0]:
+            lines.pop(0)
 
-        if not result or result[-1] == "":
-            result.append(line)
-            continue
+        while lines and not lines[-1]:
+            lines.pop()
 
-        previous = result[-1]
+        result.append(
+            {
+                "number": section["number"],
+                "heading": section["heading"],
+                "text": "\n".join(lines),
+            }
+        )
 
-        # Join normal PDF line wrapping.
-        if not previous.endswith((".", ":", ";", "?", "!")):
-            result[-1] = f"{previous} {line}"
-        else:
-            result.append(line)
-
-    return "\n".join(result).strip()
+    return result
 
 
-def build_pages_text(pages: list[dict]) -> list[str]:
-    """Normalize all page text."""
+def structure_document(document: dict) -> dict:
+    """Structure one document."""
 
-    return [page["text"] for page in pages if page.get("text", "").strip()]
+    if document["type"] == "definitions":
+        return {
+            "type": "definitions",
+            "number": 0,
+            "title": "Definiciones",
+            "source_file": document["source_file"],
+            "text": "\n\n".join(
+                page["text"] for page in document["pages"] if page["text"].strip()
+            ),
+            "sections": [],
+        }
 
+    full_text = "\n".join(
+        page["text"] for page in document["pages"] if page["text"].strip()
+    )
 
-def extract_laws(pages: list[dict]) -> list[dict]:
-    """Extract laws and their numbered sections from page text."""
-
-    laws = []
-    current_law = None
-    current_section = None
-    current_section_lines = []
-
-    def save_section() -> None:
-        nonlocal current_section
-        nonlocal current_section_lines
-
-        if current_law is None or current_section is None:
-            return
-
-        text = merge_wrapped_lines(current_section_lines)
-
-        if text:
-            current_law["sections"].append(
-                {
-                    "number": current_section,
-                    "text": text,
-                }
-            )
-
-        current_section = None
-        current_section_lines = []
-
-    def save_law() -> None:
-        nonlocal current_law
-
-        save_section()
-
-        if current_law is not None:
-            laws.append(current_law)
-
-        current_law = None
-
-    for page in pages:
-        page_number = page["page"]
-
-        lines = page["text"].splitlines()
-
-        for raw_line in lines:
-            line = normalize_line(raw_line)
-
-            if not line:
-                continue
-
-            # Ignore repeated footer.
-            if re.match(
-                r"^LEYES DEL JUEGO DE RUGBY 2026(?:\s+\d+)?$",
-                line,
-                re.IGNORECASE,
-            ):
-                continue
-
-            # Detect "Ley X".
-            if is_law_heading(line):
-                law_number = parse_law_number(line)
-
-                # If this is the same law we are already processing,
-                # it is a repeated page header, not a new law.
-                if current_law is not None and current_law["number"] == law_number:
-                    if page_number not in current_law["pages"]:
-                        current_law["pages"].append(page_number)
-
-                    continue
-
-                # New law.
-                save_law()
-
-                current_law = {
-                    "number": law_number,
-                    "title": "",
-                    "pages": [page_number],
-                    "sections": [],
-                }
-
-                continue
-
-            if current_law is None:
-                continue
-
-            if page_number not in current_law["pages"]:
-                current_law["pages"].append(page_number)
-
-            # Skip repeated law title if it appears immediately
-            # after a repeated "Ley X" header.
-            if not current_law["title"]:
-                if not is_section_start(line):
-                    current_law["title"] = line
-                    continue
-
-            # Detect numbered rule/section.
-            if is_section_start(line):
-                save_section()
-
-                current_section = parse_section_number(line)
-
-                match = SECTION_PATTERN.match(line)
-
-                title_or_text = (
-                    match.group("title").strip()
-                    if match and match.group("title")
-                    else ""
-                )
-
-                current_section_lines = []
-
-                if title_or_text:
-                    current_section_lines.append(title_or_text)
-
-                continue
-
-            # Continuation of current section.
-            if current_section is not None:
-                current_section_lines.append(line)
-
-    save_law()
-
-    return laws
-
-
-def extract_definitions(pages: list[dict]) -> dict:
-    """Extract the definitions section before the first law."""
-
-    lines = []
-
-    for page in pages:
-        for raw_line in page["text"].splitlines():
-            line = normalize_line(raw_line)
-
-            if not line:
-                continue
-
-            if is_law_heading(line):
-                text = merge_wrapped_lines(lines)
-
-                return {
-                    "text": text,
-                    "pages": [
-                        page_item["page"]
-                        for page_item in pages
-                        if page_item["page"] < page["page"]
-                    ],
-                }
-
-            if re.match(
-                r"^LEYES DEL JUEGO DE RUGBY 2026(?:\s+\d+)?$",
-                line,
-                re.IGNORECASE,
-            ):
-                continue
-
-            lines.append(line)
+    sections = extract_sections(full_text)
+    sections = move_headings_to_next_section(sections)
+    sections = clean_section_text(sections)
 
     return {
-        "text": merge_wrapped_lines(lines),
-        "pages": [],
+        "type": "law",
+        "number": document["number"],
+        "title": "",
+        "source_file": document["source_file"],
+        "text": full_text,
+        "sections": sections,
     }
 
 
 def main() -> None:
-    """Load cleaned pages and create structured regulatory data."""
+    """Create structured documents."""
 
-    with INPUT_PATH.open("r", encoding="utf-8") as file:
-        pages = json.load(file)
+    with INPUT_PATH.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        data = json.load(file)
 
-    definitions = extract_definitions(pages)
-    laws = extract_laws(pages)
+    structured_documents = [
+        structure_document(document) for document in data["documents"]
+    ]
 
     output = {
-        "sport": "rugby",
-        "variant": "rugby_xv",
-        "source": {
-            "organization": "World Rugby",
-            "year": 2026,
-            "language": "es",
-        },
-        "definitions": definitions,
-        "laws": laws,
+        "sport": data["sport"],
+        "variant": data["variant"],
+        "source": data["source"],
+        "documents": structured_documents,
     }
 
     OUTPUT_PATH.parent.mkdir(
@@ -279,7 +285,10 @@ def main() -> None:
         exist_ok=True,
     )
 
-    with OUTPUT_PATH.open("w", encoding="utf-8") as file:
+    with OUTPUT_PATH.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
         json.dump(
             output,
             file,
@@ -287,11 +296,21 @@ def main() -> None:
             indent=2,
         )
 
+    laws = [document for document in structured_documents if document["type"] == "law"]
+
     total_sections = sum(len(law["sections"]) for law in laws)
 
-    print(f"Laws detected: {len(laws)}")
-    print(f"Sections detected: {total_sections}")
-    print(f"Definitions characters: " f"{len(definitions['text'])}")
+    print(f"Documents structured: " f"{len(structured_documents)}")
+    print(f"Laws structured: " f"{len(laws)}")
+    print(f"Total sections: " f"{total_sections}")
+
+    for law in laws:
+        print(
+            f"Law {law['number']}: "
+            f"{law['title']} "
+            f"({len(law['sections'])} sections)"
+        )
+
     print(f"Output: {OUTPUT_PATH}")
 
 
